@@ -336,7 +336,13 @@ func (ca *CertificateAuthorityImpl) IssueCertificate(csr x509.CertificateRequest
 		Serial: serialBigInt,
 	}
 
+	// Enforce a minimum time granularity to approximate constant time
+	// TODO: Make this timer configurable or const
+	// TODO: Log when the time taken exceeds the timeout
+	minTime := time.After(250 * time.Millisecond)
 	certPEM, err := ca.signer.Sign(req)
+	<-minTime
+
 	ca.noteHSMFault(err)
 	if err != nil {
 		err = core.InternalServerError(err.Error())
