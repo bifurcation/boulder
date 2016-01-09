@@ -49,6 +49,13 @@ var badSignatureAlgorithms = map[x509.SignatureAlgorithm]bool{
 
 // Metrics for CA statistics
 const (
+	// Time allotted for the signing operation
+	// XXX(rlb): This should probably be a config option
+	allowedSigningTime = 250 * time.Millisecond
+
+	// Increments when CA observe the HSM take too long to sign
+	metricHSMTimeoutObserved = "CA.HSMTimeout.Observed"
+
 	// Increments when CA observes an HSM fault
 	metricHSMFaultObserved = "CA.OCSP.HSMFault.Observed"
 
@@ -336,18 +343,27 @@ func (ca *CertificateAuthorityImpl) IssueCertificate(csr x509.CertificateRequest
 		Serial: serialBigInt,
 	}
 
-	// Enforce a minimum time granularity to approximate constant time
-	// TODO: Make this timer configurable or const
-	// TODO: Log when the time taken exceeds the timeout
-	minTime := time.After(250 * time.Millisecond)
+	// TODO(rlb): Change to ca.clk.After()
+	signingTime := time.After(allowedSigningTime)
+	before := ca.clk.Now()
 	certPEM, err := ca.signer.Sign(req)
-	<-minTime
+	after := ca.clk.Now()
+	<-signingTime
 
 	ca.noteHSMFault(err)
 	if err != nil {
 		err = core.InternalServerError(err.Error())
 		// AUDIT[ Error Conditions ] 9cc4d537-8534-4970-8665-4b382abe82f3
 		ca.log.Audit(fmt.Sprintf("Signer failed, rolling back: serial=[%s] err=[%v]", serialHex, err))
+		return emptyCert, err
+	}
+
+	elapsed := after.Sub(before)
+	if elapsed > allowedSigningTime {
+		err = core.InternalServerError("Signing timeout")
+		ca.noteHSMFault(err)
+		// AUDIT[ Error Conditions ] 9cc4d537-8534-4970-8665-4b382abe82f3
+		ca.log.Audit(fmt.Sprintf("Signer exceeded allowed time, rolling back: serial=[%s] time=[%v]", serialHex, elapsed))
 		return emptyCert, err
 	}
 
